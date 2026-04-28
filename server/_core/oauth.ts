@@ -4,50 +4,147 @@ import * as db from "../db";
 import { getSessionCookieOptions } from "./cookies";
 import { sdk } from "./sdk";
 
-function getQueryParam(req: Request, key: string): string | undefined {
-  const value = req.query[key];
-  return typeof value === "string" ? value : undefined;
-}
-
-export function registerOAuthRoutes(app: Express) {
-  app.get("/api/oauth/callback", async (req: Request, res: Response) => {
-    const code = getQueryParam(req, "code");
-    const state = getQueryParam(req, "state");
-
-    if (!code || !state) {
-      res.status(400).json({ error: "code and state are required" });
-      return;
-    }
-
+export function registerAuthRoutes(app: Express) {
+  /**
+   * Registration endpoint - create new user with email and password
+   */
+  app.post("/api/auth/register", async (req: Request, res: Response) => {
     try {
-      const tokenResponse = await sdk.exchangeCodeForToken(code, state);
-      const userInfo = await sdk.getUserInfo(tokenResponse.accessToken);
+      const { email, name, password } = req.body;
 
-      if (!userInfo.openId) {
-        res.status(400).json({ error: "openId missing from user info" });
+      if (!email || !name || !password) {
+        res.status(400).json({ error: "email, name, and password are required" });
         return;
       }
 
+      // Check if user already exists
+      const existingUser = await db.getUserByEmail(email);
+      if (existingUser) {
+        res.status(409).json({ error: "User already exists" });
+        return;
+      }
+
+      // Generate access key and hash password
+      const accessKey = sdk.generateAccessKey();
+      const passwordHash = sdk.hashPassword(password);
+
+      // Create user
       await db.upsertUser({
-        openId: userInfo.openId,
-        name: userInfo.name || null,
-        email: userInfo.email ?? null,
-        loginMethod: userInfo.loginMethod ?? userInfo.platform ?? null,
-        lastSignedIn: new Date(),
+        accessKey,
+        email,
+        name,
+        passwordHash,
+        role: "user",
       });
 
-      const sessionToken = await sdk.createSessionToken(userInfo.openId, {
-        name: userInfo.name || "",
+      // Create session token
+      const sessionToken = await sdk.createSessionToken(accessKey, {
+        name,
         expiresInMs: ONE_YEAR_MS,
       });
 
+      // Set session cookie
       const cookieOptions = getSessionCookieOptions(req);
-      res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ONE_YEAR_MS });
+      res.cookie(COOKIE_NAME, sessionToken, {
+        ...cookieOptions,
+        maxAge: ONE_YEAR_MS,
+      });
 
-      res.redirect(302, "/");
+      res.json({
+        success: true,
+        accessKey,
+        message: "User registered successfully",
+      });
     } catch (error) {
-      console.error("[OAuth] Callback failed", error);
-      res.status(500).json({ error: "OAuth callback failed" });
+      console.error("[Auth] Registration failed", error);
+      res.status(500).json({ error: "Registration failed" });
+    }
+  });
+
+  /**
+   * Login endpoint - authenticate with email and password
+   */
+  app.post("/api/auth/login", async (req: Request, res: Response) => {
+    try {
+      const { email, password } = req.body;
+
+      if (!email || !password) {
+        res.status(400).json({ error: "email and password are required" });
+        return;
+      }
+
+      // Find user by email
+      const user = await db.getUserByEmail(email);
+      if (!user) {
+        res.status(401).json({ error: "Invalid credentials" });
+        return;
+      }
+
+      // Verify password
+      if (!sdk.verifyPassword(password, user.passwordHash)) {
+        res.status(401).json({ error: "Invalid credentials" });
+        return;
+      }
+
+      // Create session token
+      const sessionToken = await sdk.createSessionToken(user.accessKey, {
+        name: user.name,
+        expiresInMs: ONE_YEAR_MS,
+      });
+
+      // Set session cookie
+      const cookieOptions = getSessionCookieOptions(req);
+      res.cookie(COOKIE_NAME, sessionToken, {
+        ...cookieOptions,
+        maxAge: ONE_YEAR_MS,
+      });
+
+      res.json({
+        success: true,
+        accessKey: user.accessKey,
+        message: "Login successful",
+      });
+    } catch (error) {
+      console.error("[Auth] Login failed", error);
+      res.status(500).json({ error: "Login failed" });
+    }
+  });
+
+  /**
+   * Logout endpoint - clear session cookie
+   */
+  app.post("/api/auth/logout", async (req: Request, res: Response) => {
+    try {
+      const cookieOptions = getSessionCookieOptions(req);
+      res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
+      res.json({ success: true, message: "Logout successful" });
+    } catch (error) {
+      console.error("[Auth] Logout failed", error);
+      res.status(500).json({ error: "Logout failed" });
+    }
+  });
+
+  /**
+   * Get current user endpoint
+   */
+  app.get("/api/auth/me", async (req: Request, res: Response) => {
+    try {
+      const user = (req as any).user;
+      if (!user) {
+        res.status(401).json({ error: "Not authenticated" });
+        return;
+      }
+
+      res.json({
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        accessKey: user.accessKey,
+        role: user.role,
+      });
+    } catch (error) {
+      console.error("[Auth] Get user failed", error);
+      res.status(500).json({ error: "Failed to get user" });
     }
   });
 }
