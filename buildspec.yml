@@ -1,0 +1,34 @@
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - echo "Logging in to Amazon ECR..."
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+      - REPOSITORY_URI_FRONTEND=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME_FRONTEND
+      - REPOSITORY_URI_BACKEND=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME_BACKEND
+      - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+      - IMAGE_TAG=${COMMIT_HASH:=latest}
+      
+  build:
+    commands:
+      - echo "Building the Frontend Docker image on `date`"
+      - docker build -f Dockerfile.frontend -t $REPOSITORY_URI_FRONTEND:$IMAGE_TAG .
+      - docker tag $REPOSITORY_URI_FRONTEND:$IMAGE_TAG $REPOSITORY_URI_FRONTEND:latest
+      - echo "Building the Backend Docker image on `date`"
+      - docker build -f Dockerfile.backend -t $REPOSITORY_URI_BACKEND:$IMAGE_TAG .
+      - docker tag $REPOSITORY_URI_BACKEND:$IMAGE_TAG $REPOSITORY_URI_BACKEND:latest
+      
+  post_build:
+    commands:
+      - echo "Pushing the Docker images on `date`"
+      - docker push $REPOSITORY_URI_FRONTEND:$IMAGE_TAG
+      - docker push $REPOSITORY_URI_FRONTEND:latest
+      - docker push $REPOSITORY_URI_BACKEND:$IMAGE_TAG
+      - docker push $REPOSITORY_URI_BACKEND:latest
+      - echo "Build completed on `date`"
+      - echo "Writing image definitions file..."
+      - printf '[{"name":"chatgot-frontend","imageUri":"%s"},{"name":"chatgot-backend","imageUri":"%s"}]' $REPOSITORY_URI_FRONTEND:latest $REPOSITORY_URI_BACKEND:latest > imagedefinitions.json
+
+artifacts:
+  files: imagedefinitions.json
